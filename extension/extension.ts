@@ -1,12 +1,12 @@
 import * as vscode from 'vscode';
 import { getGitHubSession } from './github';
+import { DashboardPanel } from './dashboardPanel';
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('GIT-Alpha is now active!');
 
     let disposable = vscode.commands.registerCommand('git-alpha.openDashboard', () => {
-        vscode.window.showInformationMessage('GIT-Alpha Dashboard will open here!');
-        // Phase 2 will implement the webview panel here
+        DashboardPanel.render(context.extensionUri);
     });
 
     let loginDisposable = vscode.commands.registerCommand('git-alpha.login', async () => {

@@ -1,0 +1,11 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  padding: 0;
+  /* Ensure VS Code webview default styles don't conflict too much */
+  background-color: var(--vscode-editor-background);
+  color: var(--vscode-editor-foreground);
+}
