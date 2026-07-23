@@ -1,0 +1,9 @@
+{
+  "thresholds": {
+    "hugeFileLines": 500,
+    "maxNestingDepth": 4,
+    "duplicateBlockMinLines": 15
+  },
+  "ignore": ["**/generated/**", "**/*.min.js"],
+  "telemetry": { "enabled": false }
+}
