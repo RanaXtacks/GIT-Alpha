@@ -10,7 +10,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onCommand:git-alpha.open"
+    "onCommand:git-alpha.openDashboard",
+    "onCommand:git-alpha.login"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -18,6 +19,10 @@
       {
         "command": "git-alpha.openDashboard",
         "title": "GIT-Alpha: Open Dashboard"
+      },
+      {
+        "command": "git-alpha.login",
+        "title": "GIT-Alpha: Login to GitHub"
       }
     ]
   },
