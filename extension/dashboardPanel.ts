@@ -11,6 +11,10 @@ export class DashboardPanel {
     this._panel.webview.html = this._getWebviewContent(this._panel.webview, extensionUri);
   }
 
+  public postMessage(message: any) {
+    this._panel.webview.postMessage(message);
+  }
+
   public static render(extensionUri: vscode.Uri) {
     if (DashboardPanel.currentPanel) {
       DashboardPanel.currentPanel._panel.reveal(vscode.ViewColumn.One);
