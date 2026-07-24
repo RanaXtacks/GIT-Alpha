@@ -3,6 +3,10 @@ export interface ScanResult {
     analyzedFiles: number;
     failedFiles: number;
     complexBlocks: number;
+    duplicateBlocks: number;
+    securityRisks: number;
+    vulnerabilities: number;
+    effortTier: 'Low' | 'Medium' | 'High';
     message: string;
 }
 

@@ -9,8 +9,19 @@ export function activate(context: vscode.ExtensionContext) {
     let disposable = vscode.commands.registerCommand('git-alpha.openDashboard', async () => {
         DashboardPanel.render(context.extensionUri);
         
+        if (DashboardPanel.currentPanel) {
+            DashboardPanel.currentPanel.onMessage(async (message) => {
+                if (message.type === 'requestRescan') {
+                    await runScan();
+                }
+            });
+        }
+
+        await runScan();
+    });
+
+    async function runScan() {
         try {
-            // Trigger initial scan when dashboard opens
             if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
                 const rootPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
                 const scanner = new WorkspaceScanner(rootPath);
@@ -20,9 +31,9 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             }
         } catch (e: any) {
-            vscode.window.showErrorMessage(`Scanner failed to start: ${e.message}`);
+            vscode.window.showErrorMessage(`Scanner failed: ${e.message}`);
         }
-    });
+    }
 
     let loginDisposable = vscode.commands.registerCommand('git-alpha.login', async () => {
         await getGitHubSession();
@@ -41,17 +52,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
         
         scanTimeout = setTimeout(async () => {
-            try {
-                const rootPath = vscode.workspace.workspaceFolders![0].uri.fsPath;
-                const scanner = new WorkspaceScanner(rootPath);
-                const result = await scanner.scan();
-                
-                if (DashboardPanel.currentPanel) {
-                    DashboardPanel.currentPanel.postMessage(result);
-                }
-            } catch (e: any) {
-                vscode.window.showErrorMessage(`Scanner error: ${e.message}`);
-            }
+            await runScan();
         }, 1000); // 1-second debounce
     });
 
