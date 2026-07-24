@@ -3,9 +3,14 @@ import * as fg from 'fast-glob';
 import ignore from 'ignore';
 import { loadConfig } from './config';
 import { HostMessage } from '../shared/messages';
+import { ASTParser } from './parser';
 
 export class WorkspaceScanner {
-    constructor(private workspaceRoot: string) {}
+    private parser: ASTParser;
+
+    constructor(private workspaceRoot: string) {
+        this.parser = new ASTParser();
+    }
 
     async scan(): Promise<HostMessage> {
         try {
@@ -28,7 +33,9 @@ export class WorkspaceScanner {
             const results = await Promise.allSettled(filesToScan.map(f => this.analyzeFile(f)));
             
             const failures = results.filter(r => r.status === 'rejected');
-            const successes = results.filter(r => r.status === 'fulfilled');
+            const successes = results.filter(r => r.status === 'fulfilled') as PromiseFulfilledResult<number>[];
+
+            const totalComplexBlocks = successes.reduce((acc, curr) => acc + curr.value, 0);
 
             // Return the initial MVP scan metrics
             return {
@@ -37,6 +44,7 @@ export class WorkspaceScanner {
                     totalFiles: filesToScan.length,
                     analyzedFiles: successes.length,
                     failedFiles: failures.length,
+                    complexBlocks: totalComplexBlocks,
                     message: 'Scan completed successfully'
                 }
             };
@@ -49,11 +57,15 @@ export class WorkspaceScanner {
         }
     }
 
-    private async analyzeFile(filePath: string): Promise<void> {
-        // In Phase 3, this will use Tree-sitter. 
-        // For Phase 2, we just ensure we can read the file safely without crashing.
+    private async analyzeFile(filePath: string): Promise<number> {
+        // Now using Tree-sitter!
         const uri = vscode.Uri.file(`${this.workspaceRoot}/${filePath}`);
-        await vscode.workspace.fs.readFile(uri);
-        return Promise.resolve();
+        const fileData = await vscode.workspace.fs.readFile(uri);
+        const fileContent = Buffer.from(fileData).toString('utf8');
+        
+        // Pass to our AST Parser
+        const complexity = this.parser.analyzeComplexity(filePath, fileContent);
+        
+        return complexity;
     }
 }
