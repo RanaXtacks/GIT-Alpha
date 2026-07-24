@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { vscode } from './utilities/vscode';
 
 function App() {
   const [scanStats, setScanStats] = useState({
