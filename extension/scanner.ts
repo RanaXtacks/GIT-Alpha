@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import fg from 'fast-glob';
 import ignore from 'ignore';
 import { loadConfig } from './config';
-import { HostMessage } from '../shared/messages';
+import { HostMessage, ErroredFile, SecurityDetail } from '../shared/messages';
 import { ASTParser } from './parser';
 import { DuplicateDetector } from './duplicates';
 import { SecretScanner } from './security/secrets';
@@ -19,10 +19,10 @@ export class WorkspaceScanner {
         try {
             const config = await loadConfig(this.workspaceRoot);
             
-            // Setup ignore rules (always ignoring node_modules, .git, etc.)
+            // Setup ignore rules
             const ig = ignore().add(['.git', 'node_modules', 'dist', 'venv', 'webview-ui', ...config.ignore]);
 
-            // Find files while ignoring heavy folders directly during disk traversal
+            // Find ALL files (deep analysis)
             const entries = await fg(['**/*'], { 
                 cwd: this.workspaceRoot, 
                 onlyFiles: true,
@@ -30,36 +30,49 @@ export class WorkspaceScanner {
                 ignore: ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**', '**/.venv/**', '**/webview-ui/build/**', ...config.ignore]
             });
 
-            // Filter out ignored files
             const filesToScan = entries.filter(f => !ig.ignores(f));
 
-            // Process files with isolation so one bad file doesn't crash everything
+            // ── Collectors ──────────────────────────────────
             const duplicateDetector = new DuplicateDetector();
             const secretScanner = new SecretScanner();
+            const erroredFiles: ErroredFile[] = [];
+            const securityDetails: SecurityDetail[] = [];
             let totalSecurityRisks = 0;
-
             let pkgJsonContent: string | undefined;
             let reqTxtContent: string | undefined;
 
+            // ── Deep per-file analysis ──────────────────────
             const results = await Promise.allSettled(filesToScan.map(async f => {
                 const uri = vscode.Uri.file(`${this.workspaceRoot}/${f}`);
+                
+                // Check IDE diagnostics for errors
                 const diagnostics = vscode.languages.getDiagnostics(uri);
-                if (diagnostics.some(d => d.severity === vscode.DiagnosticSeverity.Error)) {
-                    throw new Error(`Syntax error`);
+                const fileErrors = diagnostics
+                    .filter(d => d.severity === vscode.DiagnosticSeverity.Error)
+                    .map(d => `Line ${d.range.start.line + 1}: ${d.message}`);
+
+                if (fileErrors.length > 0) {
+                    erroredFiles.push({ file: f, errors: fileErrors });
+                    throw new Error(`${fileErrors.length} error(s) detected`);
                 }
 
                 const fileData = await vscode.workspace.fs.readFile(uri);
                 const fileContent = Buffer.from(fileData).toString('utf8');
 
-                // Track package manifest content for vuln scanning
+                // Track manifests for vuln scanning
                 if (f.endsWith('package.json')) pkgJsonContent = fileContent;
                 if (f.endsWith('requirements.txt')) reqTxtContent = fileContent;
 
-                // Run Secret Scan
+                // Secret Scan — collect per-file details
                 const secrets = secretScanner.scanFile(f, fileContent);
-                totalSecurityRisks += secrets.length;
+                if (secrets.length > 0) {
+                    for (const s of secrets) {
+                        securityDetails.push({ file: s.filePath, line: s.line, type: s.patternName });
+                    }
+                    totalSecurityRisks += secrets.length;
+                }
 
-                // Run Duplicate Detection
+                // Duplicate Detection
                 duplicateDetector.addFile(f, fileContent);
 
                 return this.parser.analyzeComplexity(f, fileContent);
@@ -67,17 +80,16 @@ export class WorkspaceScanner {
             
             const failures = results.filter(r => r.status === 'rejected');
             const successes = results.filter(r => r.status === 'fulfilled') as PromiseFulfilledResult<number>[];
-
             const totalComplexBlocks = successes.reduce((acc, curr) => acc + curr.value, 0);
 
-            // Run Duplicate Detection
-            const { duplicateCount } = duplicateDetector.findDuplicates(0.75);
+            // Duplicate Detection — get actual pairs
+            const { duplicateCount, duplicatePairs } = duplicateDetector.findDuplicates(0.75);
 
-            // Run Vulnerability Scan
+            // Vulnerability Scan
             const vulnerabilityScanner = new VulnerabilityScanner();
             const totalVulnerabilities = await vulnerabilityScanner.scanDependencies(pkgJsonContent, reqTxtContent);
 
-            // Determine Effort Tier (Low: 0 complex & 0 security risks, Medium: 1-5 complex or 1 security risk, High: 6+ complex or 2+ security risks)
+            // Effort Tier
             let effortTier: 'Low' | 'Medium' | 'High' = 'Low';
             if (totalComplexBlocks >= 6 || duplicateCount >= 5 || totalSecurityRisks >= 2 || totalVulnerabilities >= 2) {
                 effortTier = 'High';
@@ -96,7 +108,12 @@ export class WorkspaceScanner {
                     securityRisks: totalSecurityRisks,
                     vulnerabilities: totalVulnerabilities,
                     effortTier,
-                    message: 'Scan completed successfully'
+                    message: 'Scan completed successfully',
+
+                    // Detailed data
+                    erroredFiles,
+                    duplicatePairs: duplicatePairs.map(([a, b]) => ({ fileA: a, fileB: b, similarity: 0.75 })),
+                    securityDetails
                 }
             };
         } catch (error) {
@@ -108,23 +125,12 @@ export class WorkspaceScanner {
         }
     }
 
-    private async analyzeFile(filePath: string, duplicateDetector: DuplicateDetector): Promise<number> {
+    /**
+     * Reads a specific file's content for Brain analysis
+     */
+    public async getFileContent(filePath: string): Promise<string> {
         const uri = vscode.Uri.file(`${this.workspaceRoot}/${filePath}`);
-        
-        // Check if VS Code's language servers have flagged this file with syntax errors
-        const diagnostics = vscode.languages.getDiagnostics(uri);
-        const hasErrors = diagnostics.some(d => d.severity === vscode.DiagnosticSeverity.Error);
-        
-        if (hasErrors) {
-            throw new Error(`File contains syntax errors detected by IDE`);
-        }
-
-        const fileData = await vscode.workspace.fs.readFile(uri);
-        const fileContent = Buffer.from(fileData).toString('utf8');
-        
-        // Feed into Duplicate Detector
-        duplicateDetector.addFile(filePath, fileContent);
-
-        return this.parser.analyzeComplexity(filePath, fileContent);
+        const data = await vscode.workspace.fs.readFile(uri);
+        return Buffer.from(data).toString('utf8');
     }
 }
