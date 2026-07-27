@@ -18,9 +18,10 @@ export interface SecurityDetail {
 
 // ── Main scan result ────────────────────────────────────────
 export interface ScanResult {
-    totalFiles: number;
-    analyzedFiles: number;
-    failedFiles: number;
+    totalFiles: number;       // All files found in workspace
+    codeFiles: number;        // Only actual code files analyzed
+    analyzedFiles: number;    // Code files that parsed successfully
+    failedFiles: number;      // Code files with errors
     complexBlocks: number;
     duplicateBlocks: number;
     securityRisks: number;

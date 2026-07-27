@@ -33,8 +33,9 @@ export function activate(context: vscode.ExtensionContext) {
             });
         }
 
-        await runScan();
-        await pushGitHubData();
+        // Fire-and-forget — panel renders instantly, data arrives via postMessage
+        runScan();
+        pushGitHubData();
     });
 
     let isScanRunning = false;

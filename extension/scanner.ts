@@ -8,20 +8,30 @@ import { DuplicateDetector } from './duplicates';
 import { SecretScanner } from './security/secrets';
 import { VulnerabilityScanner } from './security/vulnerabilities';
 
-// Only analyze code files — skip binaries, images, lock files
-const CODE_EXTENSIONS = new Set([
+// ── File Classification ─────────────────────────────────────
+// Executable code files — run complexity, duplicates, secrets
+const EXECUTABLE_EXTENSIONS = new Set([
     '.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.c', '.cpp', '.h',
     '.cs', '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala',
-    '.html', '.css', '.scss', '.less', '.vue', '.svelte',
-    '.json', '.yaml', '.yml', '.toml', '.xml', '.md', '.txt',
-    '.sh', '.bash', '.bat', '.ps1', '.sql', '.r', '.env'
+    '.vue', '.svelte', '.sh', '.bash', '.bat', '.ps1', '.sql', '.r'
 ]);
 
-const MAX_FILE_SIZE_BYTES = 256 * 1024; // 256 KB — skip huge files
-const BATCH_SIZE = 20; // Process 20 files at a time, not 511 at once
+// Data/config files — count them but DON'T run complexity/duplicates
+const DATA_EXTENSIONS = new Set([
+    '.json', '.yaml', '.yml', '.toml', '.xml', '.md', '.txt',
+    '.html', '.css', '.scss', '.less', '.env', '.ini', '.cfg'
+]);
+
+function isCodeFile(ext: string): boolean {
+    return EXECUTABLE_EXTENSIONS.has(ext) || DATA_EXTENSIONS.has(ext);
+}
+
+const MAX_FILE_SIZE_BYTES = 200 * 1024; // 200 KB
+const BATCH_SIZE = 10; // Smaller batches = less concurrent memory
 
 export class WorkspaceScanner {
     private parser: ASTParser;
+    private decoder = new TextDecoder('utf-8');
 
     constructor(private workspaceRoot: string) {
         this.parser = new ASTParser();
@@ -31,16 +41,37 @@ export class WorkspaceScanner {
         try {
             const config = await loadConfig(this.workspaceRoot);
             
-            const ig = ignore().add(['.git', 'node_modules', 'dist', 'venv', 'webview-ui', ...config.ignore]);
+            const ig = ignore().add([
+                '.git', 'node_modules', 'dist', 'venv', '.venv', 
+                'webview-ui', '__pycache__', '.next', '.nuxt',
+                'build', 'coverage', '.tox', '.mypy_cache',
+                ...config.ignore
+            ]);
 
             const entries = await fg(['**/*'], { 
                 cwd: this.workspaceRoot, 
                 onlyFiles: true,
-                dot: true,
-                ignore: ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**', '**/.venv/**', '**/webview-ui/**', '**/*.lock', '**/package-lock.json', ...config.ignore]
+                dot: false,
+                ignore: [
+                    '**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**', 
+                    '**/.venv/**', '**/venv/**', '**/webview-ui/**', '**/__pycache__/**',
+                    '**/*.lock', '**/package-lock.json', '**/yarn.lock', '**/pnpm-lock.yaml',
+                    '**/.next/**', '**/.nuxt/**', '**/coverage/**', '**/.tox/**',
+                    '**/.mypy_cache/**', '**/*.pyc', '**/*.pyo',
+                    ...config.ignore
+                ]
             });
 
-            const filesToScan = entries.filter(f => !ig.ignores(f));
+            const allFiles = entries.filter(f => !ig.ignores(f));
+
+            // ── Pre-filter: Only count actual code files ─────────
+            const codeFiles: string[] = [];
+            for (const f of allFiles) {
+                const ext = '.' + (f.split('.').pop()?.toLowerCase() || '');
+                if (isCodeFile(ext)) {
+                    codeFiles.push(f);
+                }
+            }
 
             // ── Collectors ──────────────────────────────────
             const duplicateDetector = new DuplicateDetector();
@@ -49,25 +80,23 @@ export class WorkspaceScanner {
             const securityDetails: SecurityDetail[] = [];
             let totalSecurityRisks = 0;
             let totalComplexBlocks = 0;
-            let successCount = 0;
+            let analyzedCount = 0;
             let failCount = 0;
             let pkgJsonContent: string | undefined;
             let reqTxtContent: string | undefined;
 
-            // ── Process in batches of 20 to avoid memory flood ───
-            for (let i = 0; i < filesToScan.length; i += BATCH_SIZE) {
-                const batch = filesToScan.slice(i, i + BATCH_SIZE);
+            // ── Process code files in small batches ──────────
+            for (let i = 0; i < codeFiles.length; i += BATCH_SIZE) {
+                // Yield event loop between batches
+                await new Promise(resolve => setTimeout(resolve, 0));
+
+                const batch = codeFiles.slice(i, i + BATCH_SIZE);
 
                 const results = await Promise.allSettled(batch.map(async f => {
-                    // Check file extension — skip non-code files
-                    const ext = '.' + f.split('.').pop()?.toLowerCase();
-                    if (!CODE_EXTENSIONS.has(ext)) {
-                        return 0; // Skip but count as success
-                    }
-
+                    const ext = '.' + (f.split('.').pop()?.toLowerCase() || '');
                     const uri = vscode.Uri.file(`${this.workspaceRoot}/${f}`);
                     
-                    // Check IDE diagnostics for errors
+                    // Check IDE diagnostics for errors (only works for open files)
                     const diagnostics = vscode.languages.getDiagnostics(uri);
                     const fileErrors = diagnostics
                         .filter(d => d.severity === vscode.DiagnosticSeverity.Error)
@@ -75,7 +104,8 @@ export class WorkspaceScanner {
 
                     if (fileErrors.length > 0) {
                         erroredFiles.push({ file: f, errors: fileErrors });
-                        throw new Error(`${fileErrors.length} error(s) detected`);
+                        // Still count as "analyzed" but mark as failed
+                        return { analyzed: true, failed: true, complexity: 0 };
                     }
 
                     // Check file size before reading
@@ -83,66 +113,93 @@ export class WorkspaceScanner {
                     try {
                         stat = await vscode.workspace.fs.stat(uri);
                     } catch {
-                        return 0;
+                        return { analyzed: false, failed: false, complexity: 0 };
                     }
                     if (stat.size > MAX_FILE_SIZE_BYTES) {
-                        return 0; // Skip huge files
+                        return { analyzed: false, failed: false, complexity: 0 };
                     }
 
+                    // Read file — use TextDecoder to avoid double Buffer copy
                     const fileData = await vscode.workspace.fs.readFile(uri);
-                    const fileContent = Buffer.from(fileData).toString('utf8');
+                    let fileContent = this.decoder.decode(fileData);
 
-                    // Track manifests
-                    if (f.endsWith('package.json') && !f.includes('node_modules')) pkgJsonContent = fileContent;
-                    if (f.endsWith('requirements.txt')) reqTxtContent = fileContent;
+                    // Track manifests for vuln scanning
+                    if (f === 'package.json' || (f.endsWith('/package.json') && !f.includes('node_modules'))) {
+                        pkgJsonContent = fileContent;
+                    }
+                    if (f.endsWith('requirements.txt')) {
+                        reqTxtContent = fileContent;
+                    }
 
-                    // Secret scan
-                    const secrets = secretScanner.scanFile(f, fileContent);
-                    if (secrets.length > 0) {
-                        for (const s of secrets) {
-                            securityDetails.push({ file: s.filePath, line: s.line, type: s.patternName });
+                    // Secret scan — only on executable code files, skip data files
+                    if (EXECUTABLE_EXTENSIONS.has(ext)) {
+                        const secrets = secretScanner.scanFile(f, fileContent);
+                        if (secrets.length > 0) {
+                            for (const s of secrets) {
+                                securityDetails.push({ file: s.filePath, line: s.line, type: s.patternName });
+                            }
+                            totalSecurityRisks += secrets.length;
                         }
-                        totalSecurityRisks += secrets.length;
                     }
 
-                    // Duplicate detection (only for code files with enough content)
-                    if (fileContent.length > 100) {
-                        duplicateDetector.addFile(f, fileContent);
+                    // Complexity analysis — only on EXECUTABLE code, NOT json/yaml/md
+                    let complexity = 0;
+                    if (EXECUTABLE_EXTENSIONS.has(ext)) {
+                        complexity = this.parser.analyzeComplexity(f, fileContent);
+
+                        // Duplicate detection — only on executable code > 200 chars
+                        if (fileContent.length > 200) {
+                            duplicateDetector.addFile(f, fileContent);
+                        }
+                    } else {
+                        // For JSON files, try parsing to detect syntax errors
+                        if (ext === '.json') {
+                            try { JSON.parse(fileContent); } catch {
+                                erroredFiles.push({ file: f, errors: ['Invalid JSON syntax'] });
+                                return { analyzed: true, failed: true, complexity: 0 };
+                            }
+                        }
                     }
 
-                    return this.parser.analyzeComplexity(f, fileContent);
+                    // Release reference early for GC
+                    fileContent = '';
+
+                    return { analyzed: true, failed: false, complexity };
                 }));
 
                 for (const r of results) {
                     if (r.status === 'fulfilled') {
-                        totalComplexBlocks += r.value;
-                        successCount++;
-                    } else {
-                        failCount++;
+                        const val = r.value;
+                        if (val.analyzed) {
+                            analyzedCount++;
+                            if (val.failed) failCount++;
+                            totalComplexBlocks += val.complexity;
+                        }
                     }
                 }
             }
 
-            // Duplicate detection — limit comparisons for large projects
+            // Duplicate detection
             const dupResult = duplicateDetector.findDuplicates(0.75);
 
-            // Vulnerability scan (cached — fast)
+            // Vulnerability scan (cached)
             const vulnerabilityScanner = new VulnerabilityScanner();
             const totalVulnerabilities = await vulnerabilityScanner.scanDependencies(pkgJsonContent, reqTxtContent);
 
-            // Effort Tier
+            // Effort Tier — based on code quality metrics
             let effortTier: 'Low' | 'Medium' | 'High' = 'Low';
-            if (totalComplexBlocks >= 6 || dupResult.duplicateCount >= 5 || totalSecurityRisks >= 2 || totalVulnerabilities >= 2) {
+            if (totalComplexBlocks >= 50 || dupResult.duplicateCount >= 5 || totalSecurityRisks >= 3 || totalVulnerabilities >= 5) {
                 effortTier = 'High';
-            } else if (totalComplexBlocks >= 1 || dupResult.duplicateCount >= 1 || totalSecurityRisks >= 1 || totalVulnerabilities >= 1) {
+            } else if (totalComplexBlocks >= 10 || dupResult.duplicateCount >= 1 || totalSecurityRisks >= 1 || totalVulnerabilities >= 1) {
                 effortTier = 'Medium';
             }
 
             return {
                 type: 'scanComplete',
                 payload: {
-                    totalFiles: filesToScan.length,
-                    analyzedFiles: successCount,
+                    totalFiles: allFiles.length,
+                    codeFiles: codeFiles.length,
+                    analyzedFiles: analyzedCount,
                     failedFiles: failCount,
                     complexBlocks: totalComplexBlocks,
                     duplicateBlocks: dupResult.duplicateCount,
@@ -152,7 +209,7 @@ export class WorkspaceScanner {
                     message: 'Scan completed successfully',
                     erroredFiles,
                     duplicatePairs: dupResult.duplicatePairs.map(([a, b]) => ({ fileA: a, fileB: b, similarity: 0.75 })),
-                    securityDetails: securityDetails.slice(0, 50) // Cap UI payload
+                    securityDetails: securityDetails.slice(0, 30)
                 }
             };
         } catch (error) {
@@ -167,6 +224,6 @@ export class WorkspaceScanner {
     public async getFileContent(filePath: string): Promise<string> {
         const uri = vscode.Uri.file(`${this.workspaceRoot}/${filePath}`);
         const data = await vscode.workspace.fs.readFile(uri);
-        return Buffer.from(data).toString('utf8');
+        return this.decoder.decode(data);
     }
 }

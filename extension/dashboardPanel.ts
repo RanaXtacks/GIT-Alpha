@@ -25,7 +25,7 @@ export class DashboardPanel {
     } else {
       const panel = vscode.window.createWebviewPanel(
         "gitAlphaDashboard",
-        "GIT-Alpha Dashboard",
+        "GIT-Alpha!!",
         vscode.ViewColumn.One,
         {
           enableScripts: true,
@@ -68,7 +68,7 @@ export class DashboardPanel {
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
         <link rel="stylesheet" type="text/css" href="${stylesUri}">
-        <title>GIT-Alpha Dashboard</title>
+        <title>GIT-Alpha!!</title>
       </head>
       <body>
         <div id="root"></div>
