@@ -7,7 +7,17 @@ export interface VulnerabilityResult {
     vulnerabilitiesCount: number;
 }
 
+interface CacheEntry {
+    resultCount: number;
+    timestamp: number;
+}
+
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 Hours
+
 export class VulnerabilityScanner {
+    // In-memory cache keyed by "ecosystem:packageName@version"
+    private static cache: Map<string, CacheEntry> = new Map();
+
     /**
      * Checks package dependencies against OSV.dev API (v1/querybatch)
      */
@@ -50,21 +60,46 @@ export class VulnerabilityScanner {
 
         if (queries.length === 0) return 0;
 
-        // Query OSV API in batch (max 100 per request)
+        // Separate cached vs uncached queries
+        let totalVulns = 0;
+        const uncachedQueries: typeof queries = [];
+        const now = Date.now();
+
+        for (const q of queries) {
+            const key = `${q.package.ecosystem}:${q.package.name}@${q.version || 'latest'}`;
+            const cached = VulnerabilityScanner.cache.get(key);
+
+            if (cached && (now - cached.timestamp < CACHE_TTL_MS)) {
+                totalVulns += cached.resultCount;
+            } else {
+                uncachedQueries.push(q);
+            }
+        }
+
+        if (uncachedQueries.length === 0) {
+            return totalVulns;
+        }
+
+        // Query OSV API in batch for remaining uncached packages (max 50)
         try {
-            const responseData = await this.queryOSV(queries.slice(0, 50));
-            let totalVulns = 0;
+            const responseData = await this.queryOSV(uncachedQueries.slice(0, 50));
             if (responseData && Array.isArray(responseData.results)) {
-                for (const result of responseData.results) {
-                    if (result.vulns && Array.isArray(result.vulns)) {
-                        totalVulns += result.vulns.length;
-                    }
-                }
+                responseData.results.forEach((result: any, idx: number) => {
+                    const q = uncachedQueries[idx];
+                    if (!q) return;
+
+                    const count = (result.vulns && Array.isArray(result.vulns)) ? result.vulns.length : 0;
+                    totalVulns += count;
+
+                    // Cache response
+                    const key = `${q.package.ecosystem}:${q.package.name}@${q.version || 'latest'}`;
+                    VulnerabilityScanner.cache.set(key, { resultCount: count, timestamp: now });
+                });
             }
             return totalVulns;
         } catch (err) {
             console.warn('OSV vulnerability scan failed/timed out:', err);
-            return 0;
+            return totalVulns;
         }
     }
 

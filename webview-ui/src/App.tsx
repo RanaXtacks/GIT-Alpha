@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { vscode } from './utilities/vscode';
-import { ErroredFile, DuplicatePair, SecurityDetail, GitHubRepoData } from '../../shared/messages';
+import { ErroredFile, DuplicatePair, SecurityDetail, GitHubRepoData } from './types';
 
 function App() {
   const [scanStats, setScanStats] = useState({

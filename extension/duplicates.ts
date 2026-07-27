@@ -3,14 +3,20 @@ export interface FileSignature {
     shingles: Set<string>;
 }
 
+const MAX_FILES_FOR_DUPLICATE_CHECK = 200; // Cap to prevent O(n²) explosion
+
 export class DuplicateDetector {
     private fileSignatures: FileSignature[] = [];
 
     /**
-     * Extracts token shingles (k=5) from code content
+     * Extracts token shingles (k=5) from code content.
+     * Caps shingles per file at 500 to prevent memory bloat.
      */
     public addFile(filePath: string, content: string) {
-        const tokens = content
+        // Only keep first 10,000 chars for shingle extraction (no need to tokenize giant files)
+        const trimmed = content.substring(0, 10000);
+        
+        const tokens = trimmed
             .replace(/\s+/g, ' ')
             .trim()
             .split(' ')
@@ -19,12 +25,13 @@ export class DuplicateDetector {
         if (tokens.length < 5) return;
 
         const shingles = new Set<string>();
-        for (let i = 0; i <= tokens.length - 5; i++) {
+        const limit = Math.min(tokens.length - 4, 500); // Cap at 500 shingles
+        for (let i = 0; i < limit; i++) {
             const shingle = tokens.slice(i, i + 5).join(' ');
             shingles.add(shingle);
         }
 
-        if (shingles.size > 0) {
+        if (shingles.size > 0 && this.fileSignatures.length < MAX_FILES_FOR_DUPLICATE_CHECK) {
             this.fileSignatures.push({ filePath, shingles });
         }
     }

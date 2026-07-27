@@ -4,10 +4,19 @@ import { DashboardPanel } from './dashboardPanel';
 import { WorkspaceScanner } from './scanner';
 import { GeminiaBrain } from './brain';
 
+let statusBarItem: vscode.StatusBarItem;
+
 export function activate(context: vscode.ExtensionContext) {
     console.log('GIT-Alpha!! is now active!');
 
     const brain = new GeminiaBrain(context);
+
+    // Create live Status Bar item
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem.command = 'git-alpha.openDashboard';
+    statusBarItem.text = '$(shield) GIT-Alpha: Scanning...';
+    statusBarItem.tooltip = 'Click to open GIT-Alpha!! Dashboard';
+    statusBarItem.show();
 
     let openDashboardDisposable = vscode.commands.registerCommand('git-alpha.openDashboard', async () => {
         DashboardPanel.render(context.extensionUri);
@@ -28,18 +37,34 @@ export function activate(context: vscode.ExtensionContext) {
         await pushGitHubData();
     });
 
+    let isScanRunning = false;
+
     async function runScan() {
+        if (isScanRunning) return; // Prevent concurrent scans
+        isScanRunning = true;
         try {
             if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
                 const rootPath = vscode.workspace.workspaceFolders[0].uri.fsPath;
                 const scanner = new WorkspaceScanner(rootPath);
                 const result = await scanner.scan();
-                if (DashboardPanel.currentPanel) {
-                    DashboardPanel.currentPanel.postMessage(result);
+                
+                if (result.type === 'scanComplete') {
+                    const p = result.payload;
+                    // Update Status Bar live
+                    const tierIcon = p.effortTier === 'High' ? '$(error)' : p.effortTier === 'Medium' ? '$(warning)' : '$(check)';
+                    statusBarItem.text = `${tierIcon} GIT-Alpha: ${p.effortTier} Effort | ${p.securityRisks} Risks`;
+                    statusBarItem.tooltip = `GIT-Alpha!! Health Status:\n- Effort Tier: ${p.effortTier}\n- Security Risks: ${p.securityRisks}\n- CVE Vulns: ${p.vulnerabilities}\n- Errored Files: ${p.failedFiles}\nClick to open Dashboard`;
+
+                    if (DashboardPanel.currentPanel) {
+                        DashboardPanel.currentPanel.postMessage(result);
+                    }
                 }
             }
         } catch (e: any) {
+            statusBarItem.text = '$(alert) GIT-Alpha: Error';
             vscode.window.showErrorMessage(`Scanner failed: ${e.message}`);
+        } finally {
+            isScanRunning = false;
         }
     }
 
@@ -74,7 +99,6 @@ export function activate(context: vscode.ExtensionContext) {
             }
         } catch (err: any) {
             console.error('Brain handler error:', err);
-            // Send error back to dashboard so loading spinner stops
             if (DashboardPanel.currentPanel) {
                 DashboardPanel.currentPanel.postMessage({
                     type: 'brainAnalysis',
@@ -129,7 +153,20 @@ export function activate(context: vscode.ExtensionContext) {
         }, 1000);
     });
 
-    context.subscriptions.push(openDashboardDisposable, loginDisposable, setBrainKeyDisposable, watcherDisposable);
+    context.subscriptions.push(
+        statusBarItem,
+        openDashboardDisposable,
+        loginDisposable,
+        setBrainKeyDisposable,
+        watcherDisposable
+    );
+
+    // Status bar will populate on first dashboard open or file save
+    statusBarItem.text = '$(shield) GIT-Alpha: Ready';
 }
 
-export function deactivate() {}
+export function deactivate() {
+    if (statusBarItem) {
+        statusBarItem.dispose();
+    }
+}

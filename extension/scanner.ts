@@ -8,6 +8,18 @@ import { DuplicateDetector } from './duplicates';
 import { SecretScanner } from './security/secrets';
 import { VulnerabilityScanner } from './security/vulnerabilities';
 
+// Only analyze code files — skip binaries, images, lock files
+const CODE_EXTENSIONS = new Set([
+    '.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.c', '.cpp', '.h',
+    '.cs', '.go', '.rs', '.rb', '.php', '.swift', '.kt', '.scala',
+    '.html', '.css', '.scss', '.less', '.vue', '.svelte',
+    '.json', '.yaml', '.yml', '.toml', '.xml', '.md', '.txt',
+    '.sh', '.bash', '.bat', '.ps1', '.sql', '.r', '.env'
+]);
+
+const MAX_FILE_SIZE_BYTES = 256 * 1024; // 256 KB — skip huge files
+const BATCH_SIZE = 20; // Process 20 files at a time, not 511 at once
+
 export class WorkspaceScanner {
     private parser: ASTParser;
 
@@ -19,15 +31,13 @@ export class WorkspaceScanner {
         try {
             const config = await loadConfig(this.workspaceRoot);
             
-            // Setup ignore rules
             const ig = ignore().add(['.git', 'node_modules', 'dist', 'venv', 'webview-ui', ...config.ignore]);
 
-            // Find ALL files (deep analysis)
             const entries = await fg(['**/*'], { 
                 cwd: this.workspaceRoot, 
                 onlyFiles: true,
                 dot: true,
-                ignore: ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**', '**/.venv/**', '**/webview-ui/build/**', ...config.ignore]
+                ignore: ['**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**', '**/.venv/**', '**/webview-ui/**', '**/*.lock', '**/package-lock.json', ...config.ignore]
             });
 
             const filesToScan = entries.filter(f => !ig.ignores(f));
@@ -38,62 +48,93 @@ export class WorkspaceScanner {
             const erroredFiles: ErroredFile[] = [];
             const securityDetails: SecurityDetail[] = [];
             let totalSecurityRisks = 0;
+            let totalComplexBlocks = 0;
+            let successCount = 0;
+            let failCount = 0;
             let pkgJsonContent: string | undefined;
             let reqTxtContent: string | undefined;
 
-            // ── Deep per-file analysis ──────────────────────
-            const results = await Promise.allSettled(filesToScan.map(async f => {
-                const uri = vscode.Uri.file(`${this.workspaceRoot}/${f}`);
-                
-                // Check IDE diagnostics for errors
-                const diagnostics = vscode.languages.getDiagnostics(uri);
-                const fileErrors = diagnostics
-                    .filter(d => d.severity === vscode.DiagnosticSeverity.Error)
-                    .map(d => `Line ${d.range.start.line + 1}: ${d.message}`);
+            // ── Process in batches of 20 to avoid memory flood ───
+            for (let i = 0; i < filesToScan.length; i += BATCH_SIZE) {
+                const batch = filesToScan.slice(i, i + BATCH_SIZE);
 
-                if (fileErrors.length > 0) {
-                    erroredFiles.push({ file: f, errors: fileErrors });
-                    throw new Error(`${fileErrors.length} error(s) detected`);
-                }
-
-                const fileData = await vscode.workspace.fs.readFile(uri);
-                const fileContent = Buffer.from(fileData).toString('utf8');
-
-                // Track manifests for vuln scanning
-                if (f.endsWith('package.json')) pkgJsonContent = fileContent;
-                if (f.endsWith('requirements.txt')) reqTxtContent = fileContent;
-
-                // Secret Scan — collect per-file details
-                const secrets = secretScanner.scanFile(f, fileContent);
-                if (secrets.length > 0) {
-                    for (const s of secrets) {
-                        securityDetails.push({ file: s.filePath, line: s.line, type: s.patternName });
+                const results = await Promise.allSettled(batch.map(async f => {
+                    // Check file extension — skip non-code files
+                    const ext = '.' + f.split('.').pop()?.toLowerCase();
+                    if (!CODE_EXTENSIONS.has(ext)) {
+                        return 0; // Skip but count as success
                     }
-                    totalSecurityRisks += secrets.length;
+
+                    const uri = vscode.Uri.file(`${this.workspaceRoot}/${f}`);
+                    
+                    // Check IDE diagnostics for errors
+                    const diagnostics = vscode.languages.getDiagnostics(uri);
+                    const fileErrors = diagnostics
+                        .filter(d => d.severity === vscode.DiagnosticSeverity.Error)
+                        .map(d => `Line ${d.range.start.line + 1}: ${d.message}`);
+
+                    if (fileErrors.length > 0) {
+                        erroredFiles.push({ file: f, errors: fileErrors });
+                        throw new Error(`${fileErrors.length} error(s) detected`);
+                    }
+
+                    // Check file size before reading
+                    let stat;
+                    try {
+                        stat = await vscode.workspace.fs.stat(uri);
+                    } catch {
+                        return 0;
+                    }
+                    if (stat.size > MAX_FILE_SIZE_BYTES) {
+                        return 0; // Skip huge files
+                    }
+
+                    const fileData = await vscode.workspace.fs.readFile(uri);
+                    const fileContent = Buffer.from(fileData).toString('utf8');
+
+                    // Track manifests
+                    if (f.endsWith('package.json') && !f.includes('node_modules')) pkgJsonContent = fileContent;
+                    if (f.endsWith('requirements.txt')) reqTxtContent = fileContent;
+
+                    // Secret scan
+                    const secrets = secretScanner.scanFile(f, fileContent);
+                    if (secrets.length > 0) {
+                        for (const s of secrets) {
+                            securityDetails.push({ file: s.filePath, line: s.line, type: s.patternName });
+                        }
+                        totalSecurityRisks += secrets.length;
+                    }
+
+                    // Duplicate detection (only for code files with enough content)
+                    if (fileContent.length > 100) {
+                        duplicateDetector.addFile(f, fileContent);
+                    }
+
+                    return this.parser.analyzeComplexity(f, fileContent);
+                }));
+
+                for (const r of results) {
+                    if (r.status === 'fulfilled') {
+                        totalComplexBlocks += r.value;
+                        successCount++;
+                    } else {
+                        failCount++;
+                    }
                 }
+            }
 
-                // Duplicate Detection
-                duplicateDetector.addFile(f, fileContent);
+            // Duplicate detection — limit comparisons for large projects
+            const dupResult = duplicateDetector.findDuplicates(0.75);
 
-                return this.parser.analyzeComplexity(f, fileContent);
-            }));
-            
-            const failures = results.filter(r => r.status === 'rejected');
-            const successes = results.filter(r => r.status === 'fulfilled') as PromiseFulfilledResult<number>[];
-            const totalComplexBlocks = successes.reduce((acc, curr) => acc + curr.value, 0);
-
-            // Duplicate Detection — get actual pairs
-            const { duplicateCount, duplicatePairs } = duplicateDetector.findDuplicates(0.75);
-
-            // Vulnerability Scan
+            // Vulnerability scan (cached — fast)
             const vulnerabilityScanner = new VulnerabilityScanner();
             const totalVulnerabilities = await vulnerabilityScanner.scanDependencies(pkgJsonContent, reqTxtContent);
 
             // Effort Tier
             let effortTier: 'Low' | 'Medium' | 'High' = 'Low';
-            if (totalComplexBlocks >= 6 || duplicateCount >= 5 || totalSecurityRisks >= 2 || totalVulnerabilities >= 2) {
+            if (totalComplexBlocks >= 6 || dupResult.duplicateCount >= 5 || totalSecurityRisks >= 2 || totalVulnerabilities >= 2) {
                 effortTier = 'High';
-            } else if (totalComplexBlocks >= 1 || duplicateCount >= 1 || totalSecurityRisks >= 1 || totalVulnerabilities >= 1) {
+            } else if (totalComplexBlocks >= 1 || dupResult.duplicateCount >= 1 || totalSecurityRisks >= 1 || totalVulnerabilities >= 1) {
                 effortTier = 'Medium';
             }
 
@@ -101,19 +142,17 @@ export class WorkspaceScanner {
                 type: 'scanComplete',
                 payload: {
                     totalFiles: filesToScan.length,
-                    analyzedFiles: successes.length,
-                    failedFiles: failures.length,
+                    analyzedFiles: successCount,
+                    failedFiles: failCount,
                     complexBlocks: totalComplexBlocks,
-                    duplicateBlocks: duplicateCount,
+                    duplicateBlocks: dupResult.duplicateCount,
                     securityRisks: totalSecurityRisks,
                     vulnerabilities: totalVulnerabilities,
                     effortTier,
                     message: 'Scan completed successfully',
-
-                    // Detailed data
                     erroredFiles,
-                    duplicatePairs: duplicatePairs.map(([a, b]) => ({ fileA: a, fileB: b, similarity: 0.75 })),
-                    securityDetails
+                    duplicatePairs: dupResult.duplicatePairs.map(([a, b]) => ({ fileA: a, fileB: b, similarity: 0.75 })),
+                    securityDetails: securityDetails.slice(0, 50) // Cap UI payload
                 }
             };
         } catch (error) {
@@ -125,9 +164,6 @@ export class WorkspaceScanner {
         }
     }
 
-    /**
-     * Reads a specific file's content for Brain analysis
-     */
     public async getFileContent(filePath: string): Promise<string> {
         const uri = vscode.Uri.file(`${this.workspaceRoot}/${filePath}`);
         const data = await vscode.workspace.fs.readFile(uri);
