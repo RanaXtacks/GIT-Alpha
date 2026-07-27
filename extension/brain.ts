@@ -71,12 +71,15 @@ Respond with:
             return response;
         } catch (err: any) {
             console.error('Gemini Brain error:', err);
-            if (err.message?.includes('401') || err.message?.includes('403')) {
-                // Invalid key — clear it so user is prompted again
+            if (err.message?.includes('401') || err.message?.includes('403') || err.message?.includes('API_KEY_INVALID')) {
                 await this.context.secrets.delete(GEMINI_SECRET_KEY);
-                return '❌ Invalid Gemini API key. It has been cleared. Please try again with a valid key.';
+                this.apiKey = undefined;
+                return '❌ Invalid Gemini API key. It has been cleared. Run "GIT-Alpha: Set Gemini API Key" and try again.';
             }
-            return `❌ Gemini API error: ${err.message || 'Unknown error'}`;
+            if (err.message?.includes('timed out')) {
+                return '⏳ Gemini took too long to respond. Check your internet connection and try again.';
+            }
+            return `❌ Gemini API error: ${err.message || 'Unknown error. Check the Developer Tools console for details.'}`;
         }
     }
 
@@ -115,31 +118,39 @@ Respond with:
                         'Content-Type': 'application/json',
                         'Content-Length': Buffer.byteLength(body)
                     },
-                    timeout: 15000
+                    timeout: 30000
                 },
                 (res) => {
                     let data = '';
                     res.on('data', chunk => data += chunk);
                     res.on('end', () => {
                         if (res.statusCode && res.statusCode >= 400) {
-                            reject(new Error(`${res.statusCode}: ${data.substring(0, 200)}`));
+                            reject(new Error(`${res.statusCode}: ${data.substring(0, 300)}`));
                             return;
                         }
                         try {
                             const parsed = JSON.parse(data);
                             const text = parsed?.candidates?.[0]?.content?.parts?.[0]?.text;
-                            resolve(text || 'No suggestion returned from Gemini.');
+                            if (text) {
+                                resolve(text);
+                            } else if (parsed?.error) {
+                                reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
+                            } else {
+                                resolve('Gemini returned an empty response. The file may not contain fixable errors.');
+                            }
                         } catch {
-                            resolve('Failed to parse Gemini response.');
+                            resolve('Failed to parse Gemini response. Raw: ' + data.substring(0, 200));
                         }
                     });
                 }
             );
 
-            req.on('error', err => reject(err));
+            req.on('error', err => {
+                reject(new Error(`Network error: ${err.message}. Check your internet connection.`));
+            });
             req.on('timeout', () => {
                 req.destroy();
-                reject(new Error('Gemini API request timed out (15s)'));
+                reject(new Error('Request timed out after 30 seconds. Gemini may be overloaded — try again.'));
             });
 
             req.write(body);

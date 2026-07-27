@@ -73,7 +73,14 @@ export function activate(context: vscode.ExtensionContext) {
                 });
             }
         } catch (err: any) {
-            vscode.window.showErrorMessage(`Brain error: ${err.message}`);
+            console.error('Brain handler error:', err);
+            // Send error back to dashboard so loading spinner stops
+            if (DashboardPanel.currentPanel) {
+                DashboardPanel.currentPanel.postMessage({
+                    type: 'brainAnalysis',
+                    payload: { file: relativeFilePath, suggestion: `❌ Brain error: ${err.message || 'Could not read file. Make sure the file exists in the workspace.'}` }
+                });
+            }
         }
     }
 
