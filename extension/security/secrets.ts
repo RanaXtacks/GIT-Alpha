@@ -4,7 +4,7 @@ export interface SecretMatch {
     patternName: string;
 }
 
-// Files where secrets scanning makes sense
+// Files where secrets scanning makes sense (including .env files)
 const SCANNABLE_EXTENSIONS = new Set([
     '.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.go', '.rs', '.rb',
     '.php', '.sh', '.bash', '.env', '.yml', '.yaml', '.toml', '.cfg', '.ini'
@@ -50,48 +50,51 @@ export class SecretScanner {
     }
 
     public scanFile(filePath: string, content: string): SecretMatch[] {
-        // Skip files that aren't likely to contain secrets
-        const ext = '.' + (filePath.split('.').pop()?.toLowerCase() || '');
-        if (!SCANNABLE_EXTENSIONS.has(ext)) {
+        const normalizedPath = filePath.replace(/\\/g, '/');
+        const filename = normalizedPath.split('/').pop() || '';
+        const ext = '.' + (filename.split('.').pop()?.toLowerCase() || '');
+
+        // Allow .env files or scannable extensions
+        const isEnvFile = filename.startsWith('.env');
+        if (!isEnvFile && !SCANNABLE_EXTENSIONS.has(ext)) {
             return [];
         }
 
         const matches: SecretMatch[] = [];
-        
-        // Only scan first 200 lines — secrets are almost always at the top
         const lines = content.split('\n');
         const linesToScan = Math.min(lines.length, 200);
 
         for (let index = 0; index < linesToScan; index++) {
-            const lineContent = lines[index];
+            const rawLine = lines[index];
             const lineNum = index + 1;
 
-            // Skip lines that are obviously not secrets
-            if (this.isIgnorableLine(lineContent)) {
+            if (this.isIgnorableLine(rawLine)) {
                 continue;
             }
+
+            // CRITICAL PERFORMANCE FIX: Truncate line to max 300 chars to eliminate catastrophic regex backtracking!
+            const lineContent = rawLine.substring(0, 300);
 
             // Pattern-based check (high confidence)
             let foundPattern = false;
             for (const pattern of this.secretPatterns) {
                 pattern.regex.lastIndex = 0;
                 if (pattern.regex.test(lineContent)) {
-                    matches.push({ filePath, line: lineNum, patternName: pattern.name });
+                    matches.push({ filePath: normalizedPath, line: lineNum, patternName: pattern.name });
                     foundPattern = true;
                     break;
                 }
             }
             if (foundPattern) continue;
 
-            // High entropy check (only for explicit string assignments)
-            // Raised threshold to 4.8 to reduce false positives
-            const assignmentMatch = lineContent.match(/(?:=|:)\s*["']([A-Za-z0-9+/=_-]{24,})["']/);
+            // High entropy check (only for explicit string assignments, entropy threshold 4.8)
+            const assignmentMatch = lineContent.match(/(?:=|:)\s*["']?([A-Za-z0-9+/=_-]{24,})["']?/);
             if (assignmentMatch) {
                 const candidate = assignmentMatch[1];
                 const entropy = this.calculateEntropy(candidate);
 
                 if (entropy > 4.8 && !this.isCommonFalsePositive(candidate)) {
-                    matches.push({ filePath, line: lineNum, patternName: 'High Entropy String' });
+                    matches.push({ filePath: normalizedPath, line: lineNum, patternName: 'High Entropy String' });
                 }
             }
         }
@@ -101,7 +104,7 @@ export class SecretScanner {
 
     private isIgnorableLine(line: string): boolean {
         const trimmed = line.trim();
-        if (trimmed.length < 10 || trimmed.length > 500) return true;
+        if (trimmed.length < 10) return true;
         
         for (const pattern of FALSE_POSITIVE_LINE_PATTERNS) {
             if (pattern.test(trimmed)) return true;
@@ -110,17 +113,11 @@ export class SecretScanner {
     }
 
     private isCommonFalsePositive(str: string): boolean {
-        // UUIDs
         if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str)) return true;
-        // Git hashes
         if (/^[0-9a-f]{40}$/i.test(str)) return true;
-        // Pure hex (likely a hash, not a secret)
         if (/^[0-9a-f]+$/i.test(str) && str.length <= 64) return true;
-        // Pure base64 padding (likely encoded data, not a key)
         if (/={2,}$/.test(str) && str.length > 100) return true;
-        // Looks like a file path or module name
         if (str.includes('/') || str.includes('\\')) return true;
-        // Repeated characters (not random enough to be a secret)
         if (/(.)\1{4,}/.test(str)) return true;
         
         return false;

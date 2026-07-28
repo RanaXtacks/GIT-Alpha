@@ -8,7 +8,6 @@ import { DuplicateDetector } from './duplicates';
 import { SecretScanner } from './security/secrets';
 import { VulnerabilityScanner } from './security/vulnerabilities';
 
-// ── File Classification ─────────────────────────────────────
 // Executable code files — run complexity, duplicates, secrets
 const EXECUTABLE_EXTENSIONS = new Set([
     '.js', '.jsx', '.ts', '.tsx', '.py', '.java', '.c', '.cpp', '.h',
@@ -22,12 +21,13 @@ const DATA_EXTENSIONS = new Set([
     '.html', '.css', '.scss', '.less', '.env', '.ini', '.cfg'
 ]);
 
-function isCodeFile(ext: string): boolean {
+function isCodeFile(ext: string, filename: string): boolean {
+    if (filename.startsWith('.env')) return true;
     return EXECUTABLE_EXTENSIONS.has(ext) || DATA_EXTENSIONS.has(ext);
 }
 
 const MAX_FILE_SIZE_BYTES = 200 * 1024; // 200 KB
-const BATCH_SIZE = 10; // Smaller batches = less concurrent memory
+const BATCH_SIZE = 10;
 
 export class WorkspaceScanner {
     private parser: ASTParser;
@@ -51,7 +51,7 @@ export class WorkspaceScanner {
             const entries = await fg(['**/*'], { 
                 cwd: this.workspaceRoot, 
                 onlyFiles: true,
-                dot: false,
+                dot: true, // Allow .env and hidden config files while ignoring .git/.venv
                 ignore: [
                     '**/node_modules/**', '**/.git/**', '**/dist/**', '**/build/**', 
                     '**/.venv/**', '**/venv/**', '**/webview-ui/**', '**/__pycache__/**',
@@ -62,18 +62,18 @@ export class WorkspaceScanner {
                 ]
             });
 
-            const allFiles = entries.filter(f => !ig.ignores(f));
+            const allFiles = entries.map(f => f.replace(/\\/g, '/')).filter(f => !ig.ignores(f));
 
-            // ── Pre-filter: Only count actual code files ─────────
+            // Pre-filter code files
             const codeFiles: string[] = [];
             for (const f of allFiles) {
-                const ext = '.' + (f.split('.').pop()?.toLowerCase() || '');
-                if (isCodeFile(ext)) {
+                const filename = f.split('/').pop() || '';
+                const ext = '.' + (filename.split('.').pop()?.toLowerCase() || '');
+                if (isCodeFile(ext, filename)) {
                     codeFiles.push(f);
                 }
             }
 
-            // ── Collectors ──────────────────────────────────
             const duplicateDetector = new DuplicateDetector();
             const secretScanner = new SecretScanner();
             const erroredFiles: ErroredFile[] = [];
@@ -85,30 +85,29 @@ export class WorkspaceScanner {
             let pkgJsonContent: string | undefined;
             let reqTxtContent: string | undefined;
 
-            // ── Process code files in small batches ──────────
             for (let i = 0; i < codeFiles.length; i += BATCH_SIZE) {
-                // Yield event loop between batches
                 await new Promise(resolve => setTimeout(resolve, 0));
 
                 const batch = codeFiles.slice(i, i + BATCH_SIZE);
 
                 const results = await Promise.allSettled(batch.map(async f => {
-                    const ext = '.' + (f.split('.').pop()?.toLowerCase() || '');
-                    const uri = vscode.Uri.file(`${this.workspaceRoot}/${f}`);
+                    const normalizedFile = f.replace(/\\/g, '/');
+                    const filename = normalizedFile.split('/').pop() || '';
+                    const ext = '.' + (filename.split('.').pop()?.toLowerCase() || '');
+                    const uri = vscode.Uri.file(`${this.workspaceRoot}/${normalizedFile}`);
                     
-                    // Check IDE diagnostics for errors (only works for open files)
+                    // Check IDE diagnostics for errors
                     const diagnostics = vscode.languages.getDiagnostics(uri);
                     const fileErrors = diagnostics
                         .filter(d => d.severity === vscode.DiagnosticSeverity.Error)
                         .map(d => `Line ${d.range.start.line + 1}: ${d.message}`);
 
                     if (fileErrors.length > 0) {
-                        erroredFiles.push({ file: f, errors: fileErrors });
-                        // Still count as "analyzed" but mark as failed
+                        erroredFiles.push({ file: normalizedFile, errors: fileErrors });
                         return { analyzed: true, failed: true, complexity: 0 };
                     }
 
-                    // Check file size before reading
+                    // Stat check
                     let stat;
                     try {
                         stat = await vscode.workspace.fs.stat(uri);
@@ -119,21 +118,22 @@ export class WorkspaceScanner {
                         return { analyzed: false, failed: false, complexity: 0 };
                     }
 
-                    // Read file — use TextDecoder to avoid double Buffer copy
+                    // Read file content
                     const fileData = await vscode.workspace.fs.readFile(uri);
                     let fileContent = this.decoder.decode(fileData);
 
-                    // Track manifests for vuln scanning
-                    if (f === 'package.json' || (f.endsWith('/package.json') && !f.includes('node_modules'))) {
+                    // Track manifests
+                    if (filename === 'package.json' && !normalizedFile.includes('node_modules')) {
                         pkgJsonContent = fileContent;
                     }
-                    if (f.endsWith('requirements.txt')) {
+                    if (filename === 'requirements.txt') {
                         reqTxtContent = fileContent;
                     }
 
-                    // Secret scan — only on executable code files, skip data files
-                    if (EXECUTABLE_EXTENSIONS.has(ext)) {
-                        const secrets = secretScanner.scanFile(f, fileContent);
+                    // Secret scan — includes .env files and code files
+                    const isEnv = filename.startsWith('.env');
+                    if (isEnv || EXECUTABLE_EXTENSIONS.has(ext)) {
+                        const secrets = secretScanner.scanFile(normalizedFile, fileContent);
                         if (secrets.length > 0) {
                             for (const s of secrets) {
                                 securityDetails.push({ file: s.filePath, line: s.line, type: s.patternName });
@@ -142,26 +142,21 @@ export class WorkspaceScanner {
                         }
                     }
 
-                    // Complexity analysis — only on EXECUTABLE code, NOT json/yaml/md
+                    // Complexity analysis — only executable code
                     let complexity = 0;
                     if (EXECUTABLE_EXTENSIONS.has(ext)) {
-                        complexity = this.parser.analyzeComplexity(f, fileContent);
+                        complexity = this.parser.analyzeComplexity(normalizedFile, fileContent);
 
-                        // Duplicate detection — only on executable code > 200 chars
                         if (fileContent.length > 200) {
-                            duplicateDetector.addFile(f, fileContent);
+                            duplicateDetector.addFile(normalizedFile, fileContent);
                         }
-                    } else {
-                        // For JSON files, try parsing to detect syntax errors
-                        if (ext === '.json') {
-                            try { JSON.parse(fileContent); } catch {
-                                erroredFiles.push({ file: f, errors: ['Invalid JSON syntax'] });
-                                return { analyzed: true, failed: true, complexity: 0 };
-                            }
+                    } else if (ext === '.json') {
+                        try { JSON.parse(fileContent); } catch {
+                            erroredFiles.push({ file: normalizedFile, errors: ['Invalid JSON syntax'] });
+                            return { analyzed: true, failed: true, complexity: 0 };
                         }
                     }
 
-                    // Release reference early for GC
                     fileContent = '';
 
                     return { analyzed: true, failed: false, complexity };
@@ -179,14 +174,11 @@ export class WorkspaceScanner {
                 }
             }
 
-            // Duplicate detection
             const dupResult = duplicateDetector.findDuplicates(0.75);
 
-            // Vulnerability scan (cached)
             const vulnerabilityScanner = new VulnerabilityScanner();
             const totalVulnerabilities = await vulnerabilityScanner.scanDependencies(pkgJsonContent, reqTxtContent);
 
-            // Effort Tier — based on code quality metrics
             let effortTier: 'Low' | 'Medium' | 'High' = 'Low';
             if (totalComplexBlocks >= 50 || dupResult.duplicateCount >= 5 || totalSecurityRisks >= 3 || totalVulnerabilities >= 5) {
                 effortTier = 'High';
@@ -222,7 +214,8 @@ export class WorkspaceScanner {
     }
 
     public async getFileContent(filePath: string): Promise<string> {
-        const uri = vscode.Uri.file(`${this.workspaceRoot}/${filePath}`);
+        const normalized = filePath.replace(/\\/g, '/');
+        const uri = vscode.Uri.file(`${this.workspaceRoot}/${normalized}`);
         const data = await vscode.workspace.fs.readFile(uri);
         return this.decoder.decode(data);
     }

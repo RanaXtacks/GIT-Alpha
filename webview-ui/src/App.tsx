@@ -5,6 +5,7 @@ import { ErroredFile, DuplicatePair, SecurityDetail, GitHubRepoData } from './ty
 function App() {
   const [scanStats, setScanStats] = useState({
     totalFiles: 0,
+    codeFiles: 0,
     analyzedFiles: 0,
     failedFiles: 0,
     complexBlocks: 0,
@@ -29,10 +30,11 @@ function App() {
       if (message.type === 'scanComplete') {
         const payload = message.payload;
         setScanStats({
-          totalFiles: payload.totalFiles,
-          analyzedFiles: payload.analyzedFiles,
-          failedFiles: payload.failedFiles,
-          complexBlocks: payload.complexBlocks,
+          totalFiles: payload.totalFiles || 0,
+          codeFiles: payload.codeFiles || payload.analyzedFiles || 0,
+          analyzedFiles: payload.analyzedFiles || 0,
+          failedFiles: payload.failedFiles || 0,
+          complexBlocks: payload.complexBlocks || 0,
           duplicateBlocks: payload.duplicateBlocks || 0,
           securityRisks: payload.securityRisks || 0,
           vulnerabilities: payload.vulnerabilities || 0,
@@ -176,13 +178,13 @@ function App() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
             
             <div className="bg-gray-900 p-6 rounded-xl border border-gray-800 shadow-xl">
-              <h3 className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1">Total Files</h3>
-              <p className="text-4xl font-extrabold text-white">{scanStats.totalFiles}</p>
-              <span className="text-xs text-gray-500 mt-2 block">Deep workspace analysis</span>
+              <h3 className="text-xs uppercase tracking-wider text-gray-400 font-semibold mb-1">Code Files Scanned</h3>
+              <p className="text-4xl font-extrabold text-white">{scanStats.codeFiles || scanStats.analyzedFiles}</p>
+              <span className="text-xs text-gray-500 mt-2 block">Source code files analyzed ({scanStats.totalFiles} workspace files)</span>
             </div>
 
             <div className="bg-gray-900 p-6 rounded-xl border border-gray-800 shadow-xl">
-              <h3 className="text-xs uppercase tracking-wider text-emerald-400 font-semibold mb-1">Successfully Analyzed</h3>
+              <h3 className="text-xs uppercase tracking-wider text-emerald-400 font-semibold mb-1">Successfully Parsed</h3>
               <p className="text-4xl font-extrabold text-emerald-400">{scanStats.analyzedFiles}</p>
               <span className="text-xs text-emerald-500/70 mt-2 block">Parse complete without errors</span>
             </div>
@@ -232,7 +234,7 @@ function App() {
               <h4 className="text-sm font-semibold text-purple-300 mb-1">Security Risks</h4>
               <p className="text-3xl font-bold text-purple-400">{scanStats.securityRisks}</p>
               <p className="text-xs text-gray-400 mt-2">
-                Hardcoded secret strings (API keys, private keys, passwords) detected via high Shannon entropy (&gt;4.3 bits/char) and pattern matching.
+                Hardcoded secret strings (API keys, private keys, passwords) detected via high Shannon entropy (&gt;4.8 bits/char) and pattern matching.
               </p>
             </div>
           </div>
@@ -342,7 +344,7 @@ function App() {
             <p className="font-semibold text-purple-300">Why is this number showing up?</p>
             <p>
               Security risks are hardcoded API keys, personal access tokens (GitHub, AWS), private keys, or high-entropy random strings sitting directly in your source code. 
-              High-entropy strings have a character distribution that looks like a password or raw token ($H(X) &gt; 4.3$ bits/char).
+              High-entropy strings have a character distribution that looks like a password or raw token ($H(X) &gt; 4.8$ bits/char).
             </p>
             <p className="text-purple-300 font-medium">
               💡 <strong>Action Required:</strong> Move these secrets into an environment file (<code className="text-purple-300">.env</code>) or use a secret manager like VS Code SecretStorage instead of hardcoding them.
