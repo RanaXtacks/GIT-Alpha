@@ -1,0 +1,11 @@
+.vscode/**
+.github/**
+node_modules/**
+webview-ui/node_modules/**
+webview-ui/src/**
+extension/**
+shared/**
+**/*.ts
+**/*.map
+.gitignore
+tsconfig.json
