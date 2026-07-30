@@ -10,10 +10,11 @@ Step-by-step from zero to deployed worldwide — **no Azure or Microsoft account
 |---|---|---|---|
 | **A. Local `.vsix`** | Your own machine or team | ❌ No | ⭐ Easy |
 | **B. GitHub Releases** | Public worldwide download link | ❌ No | ⭐⭐ Medium |
-| **C. Open VSX Registry** | Works in VS Code, VSCodium, Gitpod & more | ❌ No | ⭐⭐ Medium |
+| **C. Microsoft VS Code Marketplace** | Official Microsoft Store | ✅ Yes | ⭐⭐⭐ Hard |
+| **D. Open VSX Registry** | Works in VS Code, VSCodium, Gitpod & more | ❌ No | ⭐⭐ Medium |
 
-> **Why not the official VS Code Marketplace?**
-> Microsoft's Marketplace requires an Azure DevOps account + PAT token — which many users find blocked, slow, or frustrating to set up. **Open VSX** is the open-source equivalent hosted by the Eclipse Foundation, and is fully accepted worldwide in VS Code, VSCodium, Gitpod, Eclipse Theia, and Coder.
+> **Microsoft vs Open VSX:**
+> Microsoft's Marketplace is the default, but requires an Azure DevOps account + PAT token. **Open VSX** is the open-source equivalent hosted by the Eclipse Foundation (requires only GitHub login). We recommend publishing to BOTH so everyone can use it.
 
 ---
 
