@@ -3,7 +3,7 @@
   "displayName": "GIT-Alpha",
   "description": "Real-time Project Health & Security Dashboard for VS Code",
   "publisher": "RanaXtacks",
-  "version": "0.0.2",
+  "version": "0.0.5",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -28,6 +28,7 @@
     "gemini"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onCommand:git-alpha.openDashboard",
     "onCommand:git-alpha.login",
     "onCommand:git-alpha.setGeminiKey"
@@ -51,7 +52,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "esbuild ./extension/extension.ts --bundle --outfile=dist/extension.js --external:vscode --external:fast-glob --external:ignore --format=cjs --platform=node",
+    "compile": "esbuild ./extension/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node",
     "watch": "npm run compile -- --watch",
     "package": "npx @vscode/vsce package",
     "lint": "eslint . --ext .ts"
